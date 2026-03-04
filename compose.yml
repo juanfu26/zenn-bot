@@ -1,0 +1,23 @@
+services:
+  zenn-bot:
+    container_name: zenn-bot
+    image: juanfu26/zenn-bot:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - TELEGRAM_USER_ID=${TELEGRAM_USER_ID}
+      - LOGIN_USER=${LOGIN_USER}
+      - LOGIN_PASS=${LOGIN_PASS}
+      - LOGIN_URL=${LOGIN_URL}
+      - ACTION_URL=${ACTION_URL}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10mb"
+        max-file: "3"
