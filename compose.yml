@@ -10,6 +10,7 @@ services:
         - linux/arm64
     restart: unless-stopped
     environment:
+      - TZ=${TZ}
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
       - TELEGRAM_USER_ID=${TELEGRAM_USER_ID}
       - LOGIN_USER=${LOGIN_USER}
