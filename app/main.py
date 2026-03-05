@@ -3,9 +3,20 @@ import random
 import threading
 import signal
 import sys
+import logging
 from datetime import datetime, timedelta
 import telebot
 from playwright.sync_api import sync_playwright
+
+import messages as msg
+
+# --- LOGGING CONFIGURATION ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # --- CONFIG FROM ENVIRONMENT ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -20,25 +31,28 @@ bot = telebot.TeleBot(TOKEN)
 # Saving here: { chat_id: {'end_time': datetime, 'cancel_event': threading.Event} }
 active_tasks = {}
 
+def bot_send(chat_id, text):
+    """Wrapper to add a timestamp to telegram messages"""
+    timestamp = datetime.now().strftime('%H:%M:%S')
+    bot.send_message(chat_id, f"[{timestamp}] {text}")
+
 # --- SHUTDOWN HANDLER ---
 def signal_handler(sig, frame):
-    print("Graceful shutdown initiated...")
+    logger.info(msg.LOG_SHUTDOWN_INIT)
     try:
-        bot.send_message(USER_ID, "⚠️ **System Shutdown**: The Bot is going offline. Any active timers have been cleared.")
+        bot_send(USER_ID, msg.TG_SHUTDOWN)
     except Exception as e:
-        print(f"Could not send shutdown message: {e}")
+        logger.error(msg.LOG_SHUTDOWN_ERR.format(e))
     sys.exit(0)
 
 # Register signals for Docker stop / Ctrl+C
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
-def perform_web_action(page, chat_id, target_state):
+def perform_web_action(page, icon_selector, target_state, chat_id):
     """
     target_state: 'in' to ensure sign-in, 'out' to ensure sign-out
     """
-    icon_selector = "i.o_hr_attendance_sign_in_out_icon"
-    
     # 1. Login
     page.goto(LOGIN_URL, wait_until="networkidle")
     page.fill("#login", LOGIN_USER)
@@ -54,94 +68,133 @@ def perform_web_action(page, chat_id, target_state):
     
     if target_state == 'in':
         if "fa-sign-out" in classes:
-            bot.send_message(chat_id, "⚠️ Active session from yesterday detected. Closing it first...")
+            bot_send(chat_id, msg.TG_OLD_SESSION_DETECTED)
             page.click(icon_selector) # Close old session
             page.wait_for_timeout(4000)
             page.wait_for_selector("i.fa-sign-in", state="visible", timeout=20000)
             page.click(icon_selector) # Perform new Sign-In
-            return "✅ Old session cleared and New Sign-In confirmed."
+            return msg.TG_OLD_SESSION_CLEARED
         else:
             page.click(icon_selector) # Standard Sign-In
-            return "✅ Standard Sign-In confirmed."
+            return msg.TG_SIGN_IN_CONFIRMED
             
     elif target_state == 'out':
         if "fa-sign-out" in classes:
             page.click(icon_selector) # Sign out
-            return "✅ Sign-Out confirmed."
+            return msg.TG_SIGN_OUT_CONFIRMED
         else:
-            return "ℹ️ You were already 'Signed Out'. No action required."
+            return msg.TG_ALREADY_SIGNED_OUT
 
-def run_full_shift(chat_id, cancel_event):
+def perform_sign_in(chat_id):
+    logger.info(msg.LOG_START_SIGN_IN.format(chat_id))
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={'width': 1280, 'height': 720})
         page = context.new_page()
-        
         try:
-            # --- PHASE 1: SMART SIGN-IN ---
-            bot.send_message(chat_id, "🚀 Phase 1: Ensuring Sign-In...")
-            result_in = perform_web_action(page, chat_id, 'in')
-            bot.send_message(chat_id, result_in)
-            browser.close()
-            
-            # PHASE 2: WAIT (Interruptible)
-            wait_minutes = random.randint(575, 595) # Random between 9h35m and 9h55m
-            wait_seconds = wait_minutes * 60
-            end_time = datetime.now() + timedelta(minutes=wait_minutes)
-            
-            # Update global task with end time
-            active_tasks[chat_id]['end_time'] = end_time
-            
-            bot.send_message(chat_id, f"🕒 Phase 2: Timer started.\nAutomatic Sign-Out scheduled for {end_time.strftime('%H:%M:%S')}.\nUse /cancel to stop.")
-            
-            # Wait using event.wait() instead of time.sleep()
-            # Returns True if the event was set (cancelled), False if timeout reached
-            cancelled = cancel_event.wait(timeout=wait_seconds)
-            
-            if cancelled:
-                bot.send_message(chat_id, "🛑 **Countdown Cancelled**. I will not perform the automatic Sign-Out.")
-                return
-            
-            # --- PHASE 3: AUTOMATIC SIGN-OUT ---
-            bot.send_message(chat_id, "🚀 Phase 3: Performing Sign-Out...")
-            with sync_playwright() as p_out:
-                browser_out = p_out.chromium.launch(headless=True)
-                page_out = browser_out.new_page()
-                result_out = perform_web_action(page_out, chat_id, 'out')
-                bot.send_message(chat_id, result_out)
-                browser_out.close()
-
+            bot_send(chat_id, msg.TG_STARTING_SIGN_IN)
+            result_in = perform_web_action(page, "i.o_hr_attendance_sign_in_out_icon", 'in', chat_id)
+            bot_send(chat_id, result_in)
+            logger.info(msg.LOG_SIGN_IN_COMPLETE.format(chat_id, result_in))
         except Exception as e:
-            # Screenshot on error
             try:
                 page.screenshot(path="error.png")
                 with open("error.png", "rb") as f:
-                    bot.send_photo(chat_id, f, caption=f"❌ Error during process: {str(e)}")
+                    bot.send_photo(chat_id, f, caption=msg.TG_ERROR_SIGN_IN.format(str(e)))
             except:
-                bot.send_message(chat_id, f"❌ Critical Error: {str(e)}")
+                pass
+            raise e # Re-raise to stop flow
         finally:
-            active_tasks.pop(chat_id, None)
+            browser.close()
+
+def perform_sign_out(chat_id):
+    logger.info(msg.LOG_START_SIGN_OUT.format(chat_id))
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(viewport={'width': 1280, 'height': 720})
+        page = context.new_page()
+        try:
+            bot_send(chat_id, msg.TG_STARTING_SIGN_OUT)
+            result_out = perform_web_action(page, "i.o_hr_attendance_sign_in_out_icon", 'out', chat_id)
+            bot_send(chat_id, result_out)
+            
+            # Esperar a que se muestre el mensaje de salida
+            page.wait_for_timeout(3000)
+            try:
+                screenshot_path = "exit_screenshot.png"
+                page.screenshot(path=screenshot_path)
+                with open(screenshot_path, "rb") as f:
+                    bot.send_photo(chat_id, f, caption=msg.TG_SCREENSHOT_SIGN_OUT)
+            except Exception as img_err:
+                logger.error(msg.LOG_SIGN_OUT_SCREENSHOT_ERR.format(chat_id, img_err))
+                
+            logger.info(msg.LOG_SIGN_OUT_COMPLETE.format(chat_id, result_out))
+        except Exception as e:
+            try:
+                page.screenshot(path="error.png")
+                with open("error.png", "rb") as f:
+                    bot.send_photo(chat_id, f, caption=msg.TG_ERROR_SIGN_OUT.format(str(e)))
+            except:
+                pass
+            raise e
+        finally:
+            browser.close()
+
+def execute_workday_cycle(chat_id, cancel_event):
+    logger.info(msg.LOG_SHIFT_STARTED.format(chat_id))
+    try:
+        # --- SIGN IN ---
+        perform_sign_in(chat_id)
+        
+        # --- WAIT ---
+        wait_minutes = random.randint(575, 595)
+        # For testing, you could comment out above and use: wait_minutes = 1 
+        wait_seconds = wait_minutes * 60 + random.randint(2,55)
+        end_time = datetime.now() + timedelta(minutes=wait_minutes)
+        
+        active_tasks[chat_id]['end_time'] = end_time
+        
+        logger.info(msg.LOG_SLEEPING.format(chat_id, wait_minutes, end_time.strftime('%H:%M:%S')))
+        bot_send(chat_id, msg.TG_TIMER_STARTED.format(end_time.strftime('%H:%M:%S')))
+        
+        # Sleep until timeout or cancelled
+        cancelled = cancel_event.wait(timeout=wait_seconds)
+        
+        if cancelled:
+            logger.info(msg.LOG_CANCELLED.format(chat_id))
+            bot_send(chat_id, msg.TG_COUNTDOWN_CANCELLED)
+            return
+        
+        # --- SIGN OUT ---
+        perform_sign_out(chat_id)
+
+    except Exception as e:
+        logger.error(msg.LOG_CRITICAL_ERROR.format(chat_id, e))
+        bot_send(chat_id, msg.TG_CRITICAL_ERROR.format(str(e)))
+    finally:
+        active_tasks.pop(chat_id, None)
+        logger.info(msg.LOG_SHIFT_FINISHED.format(chat_id))
 
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     if message.from_user.id == USER_ID:
         if message.chat.id in active_tasks:
-            bot.reply_to(message, "⚠️ A shift is already in progress!")
+            bot_send(message.chat.id, msg.TG_SHIFT_IN_PROGRESS)
         else:
             cancel_event = threading.Event()
             active_tasks[message.chat.id] = {'end_time': None, 'cancel_event': cancel_event}
-            threading.Thread(target=run_full_shift, args=(message.chat.id,cancel_event)).start()
+            threading.Thread(target=execute_workday_cycle, args=(message.chat.id, cancel_event)).start()
     else:
-        bot.reply_to(message, "🚫 Access denied.")
+        bot.reply_to(message, msg.TG_ACCESS_DENIED)
 
 @bot.message_handler(commands=['cancel'])
 def handle_cancel(message):
     if message.from_user.id == USER_ID:
         if message.chat.id in active_tasks:
             active_tasks[message.chat.id]['cancel_event'].set()
-            bot.reply_to(message, "⚙️ Cancellation signal sent...")
+            bot_send(message.chat.id, msg.TG_CANCELLATION_SENT)
         else:
-            bot.reply_to(message, "❌ No active timer to cancel.")
+            bot_send(message.chat.id, msg.TG_NO_TIMER_TO_CANCEL)
 
 @bot.message_handler(commands=['status'])
 def handle_status(message):
@@ -149,19 +202,21 @@ def handle_status(message):
         task = active_tasks.get(message.chat.id)
         if task and task['end_time']:
             rem = task['end_time'] - datetime.now()
-            h, r = divmod(int(rem.total_seconds()), 3600)
-            m, s = divmod(r, 60)
-            bot.reply_to(message, f"🕒 Time remaining: {h}h {m}m {s}s\nTarget time: {active_tasks[message.chat.id].strftime('%H:%M:%S')}")
+            if rem.total_seconds() > 0:
+                h, r = divmod(int(rem.total_seconds()), 3600)
+                m, s = divmod(r, 60)
+                bot_send(message.chat.id, msg.TG_TIMER_ACTIVE.format(h, m, s, task['end_time'].strftime('%H:%M:%S')))
+            else:
+                bot_send(message.chat.id, msg.TG_TIMER_FINISHING)
+        elif task and not task['end_time']:
+            bot_send(message.chat.id, msg.TG_SIGN_IN_ACTIVE)
         else:
-            bot.reply_to(message, "❌ No active shift found.")
-
+            bot_send(message.chat.id, msg.TG_NO_SHIFT_FOUND)
 
 if __name__ == "__main__":
-    print("Bot is running and waiting for Telegram commands...")
-    # Startup
+    logger.info(msg.LOG_BOT_RUNNING)
     try:
-        bot.send_message(USER_ID, "🤖 Full Workday Agent Online.\nCommands: /start, /status, /cancel")
+        bot_send(USER_ID, msg.TG_BOT_ONLINE)
     except:
         pass
-
-    bot.polling()
+    bot.polling(non_stop=True)
