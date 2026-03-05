@@ -25,10 +25,10 @@ The system consists of three main layers:
 
 1.  **Start:** Upon container boot, the bot sends a "System Online" message to the configured `USER_ID`.
 2.  **Trigger:** User sends the `/start` command via Telegram.
-3.  **Wait Phase:** The system calculates a random delay:
+3.  **Wait:** The system calculates a random delay:
     $$t_{wait} = 525 \pm 10 \text{ minutes}$$
     *(Between 515 and 535 minutes)*.
-4.  **Action Phase:** 
+4.  **Action:** 
     * Initializes a Headless Chromium instance.
     * Navigates to the Zenn Login page.
     * Injects credentials and authenticates.
