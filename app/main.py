@@ -26,6 +26,27 @@ LOGIN_PASS = os.getenv("LOGIN_PASS")
 LOGIN_URL = os.getenv("LOGIN_URL")
 ACTION_URL = os.getenv("ACTION_URL")
 
+# --- WORK SHIFT TIMES (IN MINUTES) ---
+WORK_MINUTES_REGULAR = int(os.getenv("WORK_MINUTES_REGULAR", "515"))
+WORK_MINUTES_LUNCH = int(os.getenv("WORK_MINUTES_LUNCH", "60"))
+WORK_MINUTES_FRIDAY = int(os.getenv("WORK_MINUTES_FRIDAY", "360"))
+WORK_MINUTES_SUMMER = int(os.getenv("WORK_MINUTES_SUMMER", "420"))
+WORK_RANDOM_DELAY_MAX = int(os.getenv("WORK_RANDOM_DELAY_MAX", "10"))
+SUMMER_PERIOD_START = os.getenv("SUMMER_PERIOD_START", "07-16")
+SUMMER_PERIOD_END = os.getenv("SUMMER_PERIOD_END", "08-31")
+
+def is_summer_period(now: datetime) -> bool:
+    try:
+        start_m, start_d = map(int, SUMMER_PERIOD_START.split('-'))
+        end_m, end_d = map(int, SUMMER_PERIOD_END.split('-'))
+        current_val = now.month * 100 + now.day
+        start_val = start_m * 100 + start_d
+        end_val = end_m * 100 + end_d
+        return start_val <= current_val <= end_val
+    except Exception as e:
+        logger.error("Error parsing summer period dates: %s", e)
+        return False
+
 bot = telebot.TeleBot(TOKEN)
 
 # Saving here: { chat_id: {'end_time': datetime, 'cancel_event': threading.Event} }
@@ -147,10 +168,28 @@ def execute_workday_cycle(chat_id, cancel_event):
         perform_sign_in(chat_id)
         
         # --- WAIT ---
-        wait_minutes = random.randint(575, 595)
-        # For testing, you could comment out above and use: wait_minutes = 1 
-        wait_seconds = wait_minutes * 60 + random.randint(2,55)
-        end_time = datetime.now() + timedelta(minutes=wait_minutes)
+        now = datetime.now()
+        
+        if is_summer_period(now):
+            base_minutes = WORK_MINUTES_SUMMER
+            apply_random = True
+        elif now.weekday() == 4: # Friday (0=Mon...4=Fri)
+            base_minutes = WORK_MINUTES_FRIDAY
+            apply_random = True
+        elif 0 <= now.weekday() <= 3: # Monday to Thursday
+            base_minutes = WORK_MINUTES_REGULAR + WORK_MINUTES_LUNCH
+            apply_random = True
+        else: # Weekend contingency
+            base_minutes = 0
+            apply_random = False
+
+        if apply_random:
+            wait_minutes = base_minutes + random.randint(0, WORK_RANDOM_DELAY_MAX)
+        else:
+            wait_minutes = base_minutes
+
+        wait_seconds = wait_minutes * 60 + random.randint(2, 55)
+        end_time = now + timedelta(seconds=wait_seconds)
         
         active_tasks[chat_id]['end_time'] = end_time
         
