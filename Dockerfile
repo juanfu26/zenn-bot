@@ -1,10 +1,7 @@
 FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
 
-ENV TZ=Europe/Madrid
-RUN apt-get update && apt-get install -y tzdata \
-    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
-    && echo $TZ > /etc/timezone \
-    && rm -rf /var/lib/apt/lists/*
+# No need to install tzdata, we use environment variables for time.
+# We keep basic structure for app execution.
 
 WORKDIR /app
 
